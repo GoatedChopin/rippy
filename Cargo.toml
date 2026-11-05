@@ -31,3 +31,6 @@ gpui-pre-platform = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
+
+[build-dependencies]
+winresource = "0.1"

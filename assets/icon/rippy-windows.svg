@@ -1,0 +1,15 @@
+<!-- Rippy's app icon for Windows: the same mark, filling the square the way Windows icons do. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8B6CFF"/>
+      <stop offset="1" stop-color="#4A2DD6"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="976" height="976" rx="200" fill="url(#body)"/>
+  <g transform="translate(512 512) scale(1.18) translate(-512 -516)" fill="none" stroke="#FFFFFF" stroke-width="88" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 290 V586"/>
+    <path d="M386 462 L512 588 L638 462"/>
+    <path d="M318 640 V690 Q318 742 370 742 H654 Q706 742 706 690 V640"/>
+  </g>
+</svg>

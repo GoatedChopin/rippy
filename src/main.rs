@@ -596,7 +596,14 @@ fn main() {
             Ok(client) => cx.set_http_client(Arc::new(client)),
             Err(err) => eprintln!("Thumbnails won't load: {err:#}"),
         }
-        open_window(WindowOptions::default(), cx, |window, cx| {
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("Rippy".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        open_window(options, cx, |window, cx| {
             cx.new(|cx| SearchBox::new(handle, youtube, executor, connection, window, cx))
         })
         .expect("failed to open window");
