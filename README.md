@@ -6,6 +6,13 @@ Rippy installs its own yt-dlp, deno and ffmpeg on first launch and keeps them up
 nothing else needs installing to use it. Downloads go to `Downloads/Rippy/audio` and
 `Downloads/Rippy/video`.
 
+## Download for Windows
+
+Get `Rippy-<version>-windows-x64.zip` from the
+[latest release](https://github.com/GoatedChopin/rippy/releases/latest), extract it, and open
+`Rippy.exe`. The build isn't code-signed yet, so Windows may show "Windows protected your PC" the
+first time; choose **More info**, then **Run anyway**.
+
 ## Build on macOS
 
 Needs Rust and Xcode's command line tools.
@@ -26,6 +33,16 @@ cargo build --release        # target\release\rippy.exe, icon included
 ```
 
 The first launch asks Windows Firewall to allow Rippy's API on your network.
+
+To publish a Windows download, bump `version` in `Cargo.toml`, push, then run this on the PC
+(needs the [GitHub CLI](https://cli.github.com), signed in with `gh auth login`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File script\release-windows.ps1 -DryRun   # build and zip only
+powershell -ExecutionPolicy Bypass -File script\release-windows.ps1           # build, zip, publish
+```
+
+Test the dry run's zip by extracting it somewhere new and opening `Rippy.exe` before publishing.
 
 ## Linking other apps
 

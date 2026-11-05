@@ -1,0 +1,8 @@
+# Windows builds get the 8 MB main-thread stack gpui-kit's own builds use (GPUI can overflow
+# Windows' 1 MB default), and a static C runtime, as Zed does, so Rippy.exe starts on a PC
+# without the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8000000", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8000000", "-C", "target-feature=+crt-static"]
