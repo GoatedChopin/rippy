@@ -10,12 +10,14 @@ nothing else needs installing to use it. Downloads go to `Downloads/Rippy/audio`
 
 Get `Rippy-<version>-windows-x64.zip` from the
 [latest release](https://github.com/GoatedChopin/rippy/releases/latest), extract it, and open
-`Rippy.exe`. The build isn't code-signed yet, so Windows may show "Windows protected your PC" the
-first time; choose **More info**, then **Run anyway**.
+`Rippy.exe`. There's nothing to install or build. The build isn't code-signed yet, so Windows may
+show "Windows protected your PC" the first time; choose **More info**, then **Run anyway**.
+
+The rest of this page is for building Rippy from source.
 
 ## Build on macOS
 
-Needs Rust and Xcode's command line tools.
+Needs Rust 1.95 or newer and Xcode's command line tools.
 
 ```sh
 cargo run                    # development
@@ -24,9 +26,10 @@ cargo run                    # development
 
 ## Build on Windows
 
-Needs Windows 10 or later, Rust's MSVC toolchain (`rustup show active-toolchain` should say
-`msvc`), Visual Studio 2022 Build Tools with **Desktop development with C++** (MSVC and a Windows
-SDK), and CMake on `PATH`.
+Needs Windows 10 or later, Rust 1.95 or newer with the MSVC toolchain (`rustup show
+active-toolchain` should say `msvc`; `rustup update stable` if it's older), and Visual Studio 2022
+Build Tools with **Desktop development with C++** (MSVC and a Windows SDK). Build from a
+**Developer PowerShell for VS 2022**, which puts the CMake that comes with Build Tools on `PATH`.
 
 ```powershell
 cargo build --release        # target\release\rippy.exe, icon included
