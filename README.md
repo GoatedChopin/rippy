@@ -59,6 +59,7 @@ Settings. Send the key as `Authorization: Bearer <key>`.
 | `POST /api/downloads` with `{"url": "…", "media": "audio"}` or `"video"` | Starts a download, returns its `id` |
 | `GET /api/downloads/{id}` | `downloading`, `done` or `failed` |
 | `GET /api/downloads/{id}/file` | The downloaded file |
+| `GET /api/audio?url=…` | The audio of a link, for apps that can only GET a file: `202` with `Retry-After` until it's ready, then the file |
 
 Set `RIPPY_API_ADDR` (for example `127.0.0.1:7479`) to change where it listens.
 

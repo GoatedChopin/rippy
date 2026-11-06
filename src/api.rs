@@ -7,6 +7,7 @@
 //! POST /api/downloads               {"url": "…", "media": "audio" | "video"} starts a download
 //! GET  /api/downloads/{id}          {"status": "downloading" | "done" | "failed", …}
 //! GET  /api/downloads/{id}/file     the downloaded file
+//! GET  /api/audio?url=…             the audio of a link: 202 with Retry-After until it's ready, then the file
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -47,6 +48,7 @@ pub fn start(tokio: &tokio::runtime::Handle, youtube: RustyPipe, executor: Execu
         youtube,
         executor,
         downloads: Mutex::new(HashMap::new()),
+        audio: Mutex::new(HashMap::new()),
     });
 
     let listener = match std::net::TcpListener::bind(&address) {
@@ -84,6 +86,8 @@ struct ApiState {
     youtube: RustyPipe,
     executor: Executor,
     downloads: Mutex<HashMap<String, Download>>,
+    /// Link → download id, for /api/audio.
+    audio: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -107,6 +111,7 @@ fn router(state: Arc<ApiState>) -> Router {
         .route("/api/downloads", post(start_download))
         .route("/api/downloads/{id}", get(download_status))
         .route("/api/downloads/{id}/file", get(download_file))
+        .route("/api/audio", get(audio))
         .layer(middleware::from_fn_with_state(state.clone(), require_key))
         .with_state(state)
 }
@@ -181,16 +186,27 @@ async fn start_download(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<DownloadRequest>,
 ) -> Response {
-    let is_web_link = reqwest::Url::parse(&request.url)
-        .is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
-    if !is_web_link {
+    if !is_web_link(&request.url) {
         return error(StatusCode::BAD_REQUEST, "url must be an http or https link");
     }
     let media = match request.media {
         MediaParam::Audio => Media::Audio,
         MediaParam::Video => Media::Video,
     };
+    let id = spawn_download(&state, media, request.url);
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": id, "status": "downloading" })),
+    )
+        .into_response()
+}
 
+fn is_web_link(link: &str) -> bool {
+    reqwest::Url::parse(link).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Starts a download in the background and returns its id.
+fn spawn_download(state: &Arc<ApiState>, media: Media, url: String) -> String {
     let id = Uuid::new_v4().simple().to_string();
     state
         .downloads
@@ -202,8 +218,7 @@ async fn start_download(
     let job_id = id.clone();
     tokio::spawn(async move {
         let executor = job.executor.clone();
-        let result =
-            tokio::task::spawn_blocking(move || executor.download(media, request.url)).await;
+        let result = tokio::task::spawn_blocking(move || executor.download(media, url)).await;
         let download = match result {
             Ok(Ok(path)) => Download::Done {
                 file: file_name(&path),
@@ -218,12 +233,52 @@ async fn start_download(
         };
         job.downloads.lock().unwrap().insert(job_id, download);
     });
+    id
+}
 
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({ "id": id, "status": "downloading" })),
-    )
-        .into_response()
+#[derive(Deserialize)]
+struct AudioQuery {
+    url: String,
+}
+
+/// For apps that can only GET a file, such as Riffalong's services (riffalong-ios docs/SERVICES.md):
+/// starts the audio download for a link, or joins the one already running, and answers 202 with
+/// Retry-After until it's done, then the file. A failed download answers 502 once; asking again
+/// starts over.
+async fn audio(State(state): State<Arc<ApiState>>, Query(query): Query<AudioQuery>) -> Response {
+    if !is_web_link(&query.url) {
+        return error(StatusCode::BAD_REQUEST, "url must be an http or https link");
+    }
+    let path = {
+        let mut audio = state.audio.lock().unwrap();
+        let current = audio
+            .get(&query.url)
+            .and_then(|id| state.downloads.lock().unwrap().get(id).cloned());
+        match current {
+            Some(Download::Done { path, .. }) if path.exists() => path,
+            Some(Download::Downloading) => return not_ready(),
+            Some(Download::Failed { error: message }) => {
+                audio.remove(&query.url);
+                return error(StatusCode::BAD_GATEWAY, &message);
+            }
+            // Not asked for yet, or the file was moved since.
+            _ => {
+                let id = spawn_download(&state, Media::Audio, query.url.clone());
+                audio.insert(query.url, id);
+                return not_ready();
+            }
+        }
+    };
+    serve_file(&path).await
+}
+
+fn not_ready() -> Response {
+    let mut response =
+        (StatusCode::ACCEPTED, Json(json!({ "status": "downloading" }))).into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("3"));
+    response
 }
 
 async fn download_status(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
@@ -243,7 +298,11 @@ async fn download_file(State(state): State<Arc<ApiState>>, Path(id): Path<String
         Some(_) => return error(StatusCode::CONFLICT, "That download isn't finished"),
         None => return error(StatusCode::NOT_FOUND, "No download with that id"),
     };
-    let file = match tokio::fs::File::open(&path).await {
+    serve_file(&path).await
+}
+
+async fn serve_file(path: &std::path::Path) -> Response {
+    let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(_) => return error(StatusCode::GONE, "The file was moved or deleted"),
     };
@@ -255,7 +314,7 @@ async fn download_file(State(state): State<Arc<ApiState>>, Path(id): Path<String
         HeaderValue::from_static("application/octet-stream"),
     );
     // `filename` for clients that only read plain ASCII names, `filename*` for the real one.
-    let name = file_name(&path);
+    let name = file_name(path);
     let ascii = name
         .chars()
         .map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' })
