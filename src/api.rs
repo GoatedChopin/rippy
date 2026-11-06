@@ -7,7 +7,11 @@
 //! POST /api/downloads               {"url": "…", "media": "audio" | "video"} starts a download
 //! GET  /api/downloads/{id}          {"status": "downloading" | "done" | "failed", …}
 //! GET  /api/downloads/{id}/file     the downloaded file
-//! GET  /api/audio?url=…             the audio of a link: 202 with Retry-After until it's ready, then the file
+//! GET  /api/audio/search?q=…        search results as {"results": [{id, title, artist, duration, artwork}]}
+//! GET  /api/audio/download?id=…     a result's audio: 202 with Retry-After until it's ready, then the file
+//!
+//! The two /api/audio routes follow the search and download contract that other apps speak, such
+//! as Riffalong's custom services (riffalong-ios docs/SERVICES.md).
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -86,7 +90,7 @@ struct ApiState {
     youtube: RustyPipe,
     executor: Executor,
     downloads: Mutex<HashMap<String, Download>>,
-    /// Link → download id, for /api/audio.
+    /// Video id → download id, for /api/audio/download.
     audio: Mutex<HashMap<String, String>>,
 }
 
@@ -111,7 +115,8 @@ fn router(state: Arc<ApiState>) -> Router {
         .route("/api/downloads", post(start_download))
         .route("/api/downloads/{id}", get(download_status))
         .route("/api/downloads/{id}/file", get(download_file))
-        .route("/api/audio", get(audio))
+        .route("/api/audio/search", get(audio_search))
+        .route("/api/audio/download", get(audio_download))
         .layer(middleware::from_fn_with_state(state.clone(), require_key))
         .with_state(state)
 }
@@ -236,35 +241,78 @@ fn spawn_download(state: &Arc<ApiState>, media: Media, url: String) -> String {
     id
 }
 
-#[derive(Deserialize)]
-struct AudioQuery {
-    url: String,
+/// Search results in the contract's shape. Live streams, which have no length, can't be
+/// downloaded as a song and are left out.
+async fn audio_search(State(state): State<Arc<ApiState>>, Query(query): Query<SearchQuery>) -> Response {
+    if query.q.trim().is_empty() {
+        return error(StatusCode::BAD_REQUEST, "Add a search with ?q=");
+    }
+    match youtube::search(&state.youtube, &query.q).await {
+        Ok(hits) => {
+            let results: Vec<_> = hits
+                .into_iter()
+                .filter(|hit| hit.duration.is_some())
+                .map(|hit| {
+                    json!({
+                        "id": hit.id,
+                        "title": hit.title,
+                        "artist": hit.channel,
+                        "duration": hit.duration,
+                        "artwork": hit.thumbnail,
+                    })
+                })
+                .collect();
+            Json(json!({ "results": results })).into_response()
+        }
+        Err(err) => {
+            eprintln!("API search failed: {err}");
+            error(StatusCode::BAD_GATEWAY, "Couldn't search YouTube")
+        }
+    }
 }
 
-/// For apps that can only GET a file, such as Riffalong's services (riffalong-ios docs/SERVICES.md):
-/// starts the audio download for a link, or joins the one already running, and answers 202 with
-/// Retry-After until it's done, then the file. A failed download answers 502 once; asking again
-/// starts over.
-async fn audio(State(state): State<Arc<ApiState>>, Query(query): Query<AudioQuery>) -> Response {
-    if !is_web_link(&query.url) {
-        return error(StatusCode::BAD_REQUEST, "url must be an http or https link");
+#[derive(Deserialize)]
+struct AudioDownloadQuery {
+    id: String,
+}
+
+/// A search result's audio: starts the download, or joins the one already running, and answers
+/// 202 with Retry-After until it's done, then the file. A failed download answers 502 once; asking
+/// again starts over.
+async fn audio_download(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AudioDownloadQuery>,
+) -> Response {
+    // A video id from /api/audio/search, so the link is one Rippy makes.
+    let is_video_id = !query.id.is_empty()
+        && query.id.len() <= 64
+        && query
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !is_video_id {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "id must be a video id from /api/audio/search",
+        );
     }
     let path = {
         let mut audio = state.audio.lock().unwrap();
         let current = audio
-            .get(&query.url)
+            .get(&query.id)
             .and_then(|id| state.downloads.lock().unwrap().get(id).cloned());
         match current {
             Some(Download::Done { path, .. }) if path.exists() => path,
             Some(Download::Downloading) => return not_ready(),
             Some(Download::Failed { error: message }) => {
-                audio.remove(&query.url);
+                audio.remove(&query.id);
                 return error(StatusCode::BAD_GATEWAY, &message);
             }
             // Not asked for yet, or the file was moved since.
             _ => {
-                let id = spawn_download(&state, Media::Audio, query.url.clone());
-                audio.insert(query.url, id);
+                let link = format!("https://www.youtube.com/watch?v={}", query.id);
+                let id = spawn_download(&state, Media::Audio, link);
+                audio.insert(query.id, id);
                 return not_ready();
             }
         }
