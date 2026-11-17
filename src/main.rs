@@ -300,6 +300,7 @@ fn format_duration(seconds: u32) -> String {
 struct Settings {
     connection: api::Connection,
     tools: Entity<tools::Tools>,
+    executor: Executor,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -307,14 +308,85 @@ impl Settings {
     fn new(
         connection: api::Connection,
         tools: Entity<tools::Tools>,
+        executor: Executor,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&tools, |_, _, cx| cx.notify());
         Self {
             connection,
             tools,
+            executor,
             _subscriptions: vec![subscription],
         }
+    }
+
+    fn choose_folder(&mut self, media: Media, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        let executor = self.executor.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(folder) = picked
+                .await
+                .ok()
+                .and_then(|picked| picked.ok())
+                .flatten()
+                .and_then(|paths| paths.into_iter().next())
+            else {
+                return;
+            };
+            let saved = executor.set_folder(media, folder);
+            this.update_in(cx, |_, window, cx| {
+                if let Err(err) = saved {
+                    eprintln!("Couldn't save the download folder: {err}");
+                    window.push_notification(
+                        Notification::error("Couldn't save that folder. Try another one."),
+                        cx,
+                    );
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn folder_row(&self, media: Media, cx: &mut Context<Self>) -> AnyElement {
+        let (id, label) = match media {
+            Media::Audio => ("change-audio-folder", "Audio"),
+            Media::Video => ("change-video-folder", "Video"),
+        };
+        let folder = self.executor.folder(media).to_string_lossy().to_string();
+
+        h_flex()
+            .justify_between()
+            .gap_3()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label),
+                    )
+                    .child(div().text_sm().truncate().child(folder)),
+            )
+            .child(
+                Button::new(id)
+                    .small()
+                    .outline()
+                    .label("Change…")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_folder(media, window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     fn tool_row(tools: &tools::Tools, tool: Tool, cx: &App) -> impl IntoElement {
@@ -386,9 +458,18 @@ impl Render for Settings {
             .map(|tool| Self::tool_row(tools, tool, cx).into_any_element());
         let entity = self.tools.clone();
         let heading = |text: &'static str| div().text_sm().font_semibold().child(text);
+        let audio_folder = self.folder_row(Media::Audio, cx);
+        let video_folder = self.folder_row(Media::Video, cx);
 
         v_flex()
             .gap_5()
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(heading("Save downloads to"))
+                    .child(audio_folder)
+                    .child(video_folder),
+            )
             .child(
                 v_flex()
                     .gap_3()
@@ -458,9 +539,10 @@ impl SearchBox {
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search..."));
         let tools = cx.new(|cx| tools::Tools::new(tokio.clone(), cx));
-        let results =
-            cx.new(|cx| VideoList::new(executor, tokio.clone(), tools.clone(), window, cx));
-        let settings = cx.new(|cx| Settings::new(connection, tools, cx));
+        let results = cx.new(|cx| {
+            VideoList::new(executor.clone(), tokio.clone(), tools.clone(), window, cx)
+        });
+        let settings = cx.new(|cx| Settings::new(connection, tools, executor, cx));
 
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if let InputEvent::PressEnter { .. } = event {

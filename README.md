@@ -4,7 +4,8 @@ Search YouTube and save audio or video, on macOS and Windows. Built with [GPUI K
 
 Rippy installs its own yt-dlp, deno and ffmpeg on first launch and keeps them up to date, so
 nothing else needs installing to use it. Downloads go to `Downloads/Rippy/audio` and
-`Downloads/Rippy/video`.
+`Downloads/Rippy/video` unless you choose other folders under **Save downloads to** in Settings
+(the gear).
 
 ## Download for Windows
 
@@ -12,6 +13,9 @@ Get `Rippy-<version>-windows-x64.zip` from the
 [latest release](https://github.com/GoatedChopin/rippy/releases/latest), extract it, and open
 `Rippy.exe`. There's nothing to install or build. The build isn't code-signed yet, so Windows may
 show "Windows protected your PC" the first time; choose **More info**, then **Run anyway**.
+
+To update, close Rippy, download the new release's zip, and replace your `Rippy.exe` with the one
+inside it. Your folder choices, API key and downloaded tools are kept.
 
 The rest of this page is for building Rippy from source.
 
