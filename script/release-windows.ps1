@@ -1,4 +1,5 @@
-# Builds Rippy for Windows and uploads it to a GitHub release that Windows users can download.
+# Builds Rippy for Windows and uploads it to the version's GitHub release. A new release starts
+# as a prerelease; script/publish-release.sh on the Mac signs its update feed and publishes it.
 # Run on the Windows PC from the repo, signed in with `gh auth login`:
 #   powershell -ExecutionPolicy Bypass -File script\release-windows.ps1           build, zip, publish
 #   powershell -ExecutionPolicy Bypass -File script\release-windows.ps1 -DryRun   build and zip only
@@ -65,12 +66,19 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     $notes = Join-Path $env:TEMP "rippy-release-notes.md"
     $text = @"
-Download **$zipName**, extract it, and open **Rippy.exe**. Nothing else needs installing: on first launch Rippy downloads yt-dlp, deno and ffmpeg for itself.
+Download the file for your computer:
+
+- **Windows:** ``Rippy-$version-windows-x64.zip``. Extract it and open ``Rippy.exe``.
+- **Mac:** ``Rippy-$version-macos.zip``. Double-click it and drag Rippy to Applications. The first time, macOS asks you to allow it: System Settings > Privacy & Security > Open Anyway.
+- **Linux:** ``Rippy-$version-linux-x64.zip``. Extract it and run ``rippy``.
+
+Nothing else needs installing: Rippy gets yt-dlp, deno and ffmpeg for itself the first time you start it. From 0.3.0 on, Rippy also updates itself.
 
 Built from $commit.
 "@
     [System.IO.File]::WriteAllText($notes, $text)
-    Invoke-Native { gh release create $tag $zip $sums --repo $Repo --target $commit --title "Rippy $version" --notes-file $notes }
+    Invoke-Native { gh release create $tag $zip $sums --repo $Repo --target $commit --title "Rippy $version" --notes-file $notes --prerelease }
 }
 if ($LASTEXITCODE -ne 0) { throw "Uploading to GitHub failed." }
-Write-Host "Published https://github.com/$Repo/releases/tag/$tag"
+Write-Host "Uploaded to https://github.com/$Repo/releases/tag/$tag"
+Write-Host "Once the Mac and Linux downloads are up too, run script/publish-release.sh on the Mac."

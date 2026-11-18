@@ -1,6 +1,6 @@
 //! The command-line tools Rippy downloads with: yt-dlp, deno (the JavaScript runtime yt-dlp
-//! needs for YouTube) and ffmpeg + ffprobe. Rippy installs its own copies on macOS and Windows,
-//! checks for new releases at launch and once a day, and verifies every download's checksum.
+//! needs for YouTube) and ffmpeg + ffprobe. Rippy installs its own copies on macOS, Windows and
+//! Linux, checks for new releases at launch and once a day, and verifies every download's checksum.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -93,8 +93,8 @@ struct Platform {
 }
 
 enum FfmpegSource {
-    /// Martin Riedl's signed macOS builds; the value is the CPU name in his URLs.
-    MartinRiedl(&'static str),
+    /// Martin Riedl's builds (signed on macOS); the values are the OS and CPU names in his URLs.
+    MartinRiedl(&'static str, &'static str),
     /// gyan.dev's Windows release builds, linked from ffmpeg.org. x64 only; Windows on Arm emulates it.
     Gyan,
 }
@@ -106,13 +106,19 @@ impl Platform {
             Some(Platform {
                 yt_dlp: "yt-dlp_macos",
                 deno: if arm { "aarch64-apple-darwin" } else { "x86_64-apple-darwin" },
-                ffmpeg: FfmpegSource::MartinRiedl(if arm { "arm64" } else { "amd64" }),
+                ffmpeg: FfmpegSource::MartinRiedl("macos", if arm { "arm64" } else { "amd64" }),
             })
         } else if cfg!(windows) {
             Some(Platform {
                 yt_dlp: if arm { "yt-dlp_arm64.exe" } else { "yt-dlp.exe" },
                 deno: if arm { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" },
                 ffmpeg: FfmpegSource::Gyan,
+            })
+        } else if cfg!(target_os = "linux") {
+            Some(Platform {
+                yt_dlp: if arm { "yt-dlp_linux_aarch64" } else { "yt-dlp_linux" },
+                deno: if arm { "aarch64-unknown-linux-gnu" } else { "x86_64-unknown-linux-gnu" },
+                ffmpeg: FfmpegSource::MartinRiedl("linux", if arm { "arm64" } else { "amd64" }),
             })
         } else {
             None
@@ -221,10 +227,10 @@ async fn latest(tool: Tool, platform: &Platform, clients: &Clients) -> Result<Re
             })
         }
         Tool::Ffmpeg => match platform.ffmpeg {
-            FfmpegSource::MartinRiedl(cpu) => {
+            FfmpegSource::MartinRiedl(os, cpu) => {
                 // The "latest" link redirects to the build's folder, which holds ffprobe too.
                 let latest = format!(
-                    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/{cpu}/release/ffmpeg.zip"
+                    "https://ffmpeg.martin-riedl.de/redirect/latest/{os}/{cpu}/release/ffmpeg.zip"
                 );
                 let response = clients
                     .no_follow

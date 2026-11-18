@@ -65,7 +65,9 @@ impl Executor {
     }
 
     pub fn from_env() -> Self {
+        // Linux only has a Downloads folder on record when the desktop set one up.
         let downloads = dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
             .unwrap_or_else(|| PathBuf::from("data"))
             .join("Rippy");
         // Work in progress stays out of the folders people pick.

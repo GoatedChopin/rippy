@@ -43,6 +43,21 @@ pub struct Connection {
     pub key: String,
 }
 
+/// Listens on `address`. A copy that Restart launched waits for the old copy to let go of it.
+fn bind(address: &str) -> std::io::Result<std::net::TcpListener> {
+    let relaunched = std::env::var_os(crate::update::RELAUNCHED).is_some();
+    let mut tries = if relaunched { 40 } else { 1 };
+    loop {
+        match std::net::TcpListener::bind(address) {
+            Err(err) if tries > 1 && err.kind() == std::io::ErrorKind::AddrInUse => {
+                tries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Starts the server on the Tokio runtime. A bind failure is reported, not fatal.
 pub fn start(tokio: &tokio::runtime::Handle, youtube: RustyPipe, executor: Executor) -> Connection {
     let key = api_key();
@@ -55,7 +70,7 @@ pub fn start(tokio: &tokio::runtime::Handle, youtube: RustyPipe, executor: Execu
         audio: Mutex::new(HashMap::new()),
     });
 
-    let listener = match std::net::TcpListener::bind(&address) {
+    let listener = match bind(&address) {
         Ok(listener) => listener,
         Err(err) => {
             eprintln!("API couldn't listen on {address}: {err}");

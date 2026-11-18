@@ -23,8 +23,10 @@ use regex::Regex;
 use rustypipe::client::RustyPipe;
 
 mod api;
+mod feed;
 mod http;
 mod tools;
+mod update;
 mod youtube;
 mod yourip;
 
@@ -300,6 +302,7 @@ fn format_duration(seconds: u32) -> String {
 struct Settings {
     connection: api::Connection,
     tools: Entity<tools::Tools>,
+    updater: Entity<update::Updater>,
     executor: Executor,
     _subscriptions: Vec<Subscription>,
 }
@@ -308,15 +311,20 @@ impl Settings {
     fn new(
         connection: api::Connection,
         tools: Entity<tools::Tools>,
+        updater: Entity<update::Updater>,
         executor: Executor,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&tools, |_, _, cx| cx.notify());
+        let subscriptions = vec![
+            cx.observe(&tools, |_, _, cx| cx.notify()),
+            cx.observe(&updater, |_, _, cx| cx.notify()),
+        ];
         Self {
             connection,
             tools,
+            updater,
             executor,
-            _subscriptions: vec![subscription],
+            _subscriptions: subscriptions,
         }
     }
 
@@ -329,13 +337,24 @@ impl Settings {
         });
         let executor = self.executor.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Some(folder) = picked
-                .await
-                .ok()
-                .and_then(|picked| picked.ok())
-                .flatten()
-                .and_then(|paths| paths.into_iter().next())
-            else {
+            let folder = match picked.await {
+                Ok(Ok(paths)) => paths.and_then(|paths| paths.into_iter().next()),
+                // Linux opens the picker through the desktop portal, which some setups don't run.
+                result => {
+                    if let Ok(Err(err)) = result {
+                        eprintln!("Couldn't open the folder picker: {err:#}");
+                    }
+                    this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error("Couldn't open a folder picker on this computer."),
+                            cx,
+                        );
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(folder) = folder else {
                 return;
             };
             let saved = executor.set_folder(media, folder);
@@ -385,6 +404,38 @@ impl Settings {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.choose_folder(media, window, cx);
                     })),
+            )
+            .into_any_element()
+    }
+
+    fn rippy_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = match self.updater.read(cx).status() {
+            update::Status::Checking => "Checking…".into(),
+            update::Status::UpToDate => "Up to date".into(),
+            update::Status::Downloading(version) => format!("Getting {version}…").into(),
+            update::Status::Ready(version) => format!("{version} starts when Rippy restarts").into(),
+            update::Status::Failed(problem) | update::Status::Unavailable(problem) => {
+                SharedString::from(*problem)
+            }
+        };
+
+        h_flex()
+            .justify_between()
+            .gap_3()
+            .text_sm()
+            .child(
+                h_flex().gap_2().child("Rippy").child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(update::VERSION),
+                ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate()
+                    .child(status),
             )
             .into_any_element()
     }
@@ -452,11 +503,12 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rippy = self.rippy_row(cx);
         let tools = self.tools.read(cx);
-        let checking = tools.checking();
+        let checking = tools.checking() || self.updater.read(cx).checking();
         let rows = Tool::ALL
             .map(|tool| Self::tool_row(tools, tool, cx).into_any_element());
-        let entity = self.tools.clone();
+        let (tools, updater) = (self.tools.clone(), self.updater.clone());
         let heading = |text: &'static str| div().text_sm().font_semibold().child(text);
         let audio_folder = self.folder_row(Media::Audio, cx);
         let video_folder = self.folder_row(Media::Video, cx);
@@ -499,20 +551,21 @@ impl Render for Settings {
                         h_flex()
                             .justify_between()
                             .gap_3()
-                            .child(heading("Download tools"))
+                            .child(heading("Updates"))
                             .child(
-                                Button::new("check-tools")
+                                Button::new("check-for-updates")
                                     .small()
                                     .outline()
                                     .label("Check for updates")
                                     .loading(checking)
                                     .disabled(checking)
                                     .on_click(move |_, _, cx| {
-                                        entity.update(cx, |tools, cx| tools.check(cx));
+                                        updater.update(cx, |updater, cx| updater.check(cx));
+                                        tools.update(cx, |tools, cx| tools.check(cx));
                                     }),
                             ),
                     )
-                    .child(v_flex().gap_2().children(rows)),
+                    .child(v_flex().gap_2().child(rippy).children(rows)),
             )
     }
 }
@@ -521,6 +574,7 @@ struct SearchBox {
     input: Entity<InputState>,
     results: Entity<VideoList>,
     settings: Entity<Settings>,
+    updater: Entity<update::Updater>,
     youtube: RustyPipe,
     tokio: tokio::runtime::Handle,
     searching: bool,
@@ -539,27 +593,55 @@ impl SearchBox {
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search..."));
         let tools = cx.new(|cx| tools::Tools::new(tokio.clone(), cx));
+        let updater = cx.new(|cx| update::Updater::new(tokio.clone(), cx));
         let results = cx.new(|cx| {
             VideoList::new(executor.clone(), tokio.clone(), tools.clone(), window, cx)
         });
-        let settings = cx.new(|cx| Settings::new(connection, tools, executor, cx));
+        let settings =
+            cx.new(|cx| Settings::new(connection, tools, updater.clone(), executor, cx));
 
-        let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                let term = input.read(cx).value().to_string();
-                this.search(&term, cx);
-            }
-        });
+        let subscriptions = vec![
+            cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let term = input.read(cx).value().to_string();
+                    this.search(&term, cx);
+                }
+            }),
+            // The toolbar offers a restart once an update is in place.
+            cx.observe(&updater, |_, _, cx| cx.notify()),
+        ];
 
         Self {
             input,
             results,
             settings,
+            updater,
             youtube,
             tokio,
             searching: false,
             search_task: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Quitting now would leave a download half done.
+        if !self.results.read(cx).downloading.is_empty() {
+            window.push_notification(
+                Notification::info("Restart once your downloads finish."),
+                cx,
+            );
+            return;
+        }
+        match self.updater.read(cx).relaunch() {
+            Ok(()) => cx.quit(),
+            Err(err) => {
+                eprintln!("Couldn't restart Rippy: {err}");
+                window.push_notification(
+                    Notification::error("Couldn't restart Rippy. Close it and open it again."),
+                    cx,
+                );
+            }
         }
     }
 
@@ -643,6 +725,17 @@ impl Render for SearchBox {
                                 }),
                         ),
                     )
+                    .when_some(self.updater.read(cx).ready().cloned(), |toolbar, version| {
+                        toolbar.child(
+                            Button::new("restart-to-update")
+                                .primary()
+                                .label("Restart to update")
+                                .tooltip(format!("Rippy {version} is ready"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restart(window, cx);
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("settings")
                             .ghost()
@@ -658,6 +751,8 @@ impl Render for SearchBox {
 }
 
 fn main() {
+    // GPUI reports problems through `log`; errors show by default, RUST_LOG=info shows more.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
     let tokio = tokio::runtime::Runtime::new().expect("failed to start Tokio");
     let handle = tokio.handle().clone();
 
@@ -683,6 +778,8 @@ fn main() {
                 title: Some("Rippy".into()),
                 ..Default::default()
             }),
+            // Linux matches the window to rippy.desktop by this.
+            app_id: Some("rippy".into()),
             ..Default::default()
         };
         open_window(options, cx, |window, cx| {
