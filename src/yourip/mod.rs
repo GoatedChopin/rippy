@@ -3,7 +3,7 @@ mod rip;
 mod ffmpeg;
 
 mod executor;
-pub use executor::{Executor, Media};
+pub use executor::{Executor, Folder, Media};
 
 /// Stops Windows from flashing a console window each time Rippy runs a tool.
 fn hide_console(command: &mut std::process::Command) {

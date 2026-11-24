@@ -16,11 +16,32 @@ pub enum Media {
     Video,
 }
 
+/// The folders people choose in Settings: one for each kind of download, and one for Guitar Pro
+/// files made from Songsterr links.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Folder {
+    Audio,
+    Video,
+    Tabs,
+}
+
+impl From<Media> for Folder {
+    fn from(media: Media) -> Self {
+        match media {
+            Media::Audio => Folder::Audio,
+            Media::Video => Folder::Video,
+        }
+    }
+}
+
 /// Where finished downloads go. Chosen in Settings and saved between launches.
 #[derive(Clone, Serialize, Deserialize)]
 struct Folders {
     audio: PathBuf,
     video: PathBuf,
+    /// Saved only once someone picks one, so earlier copies' settings still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tabs: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -32,6 +53,8 @@ pub struct Executor {
     preferred_video_format: String,
     // Shared by every clone, so a folder chosen in Settings applies to the window and the API.
     folders: Arc<RwLock<Folders>>,
+    /// Where tabs go until a folder is chosen for them.
+    default_tabs_folder: PathBuf,
     workspace_folder: PathBuf,
 }
 
@@ -45,6 +68,7 @@ impl Executor {
         output_folder: String,
         audio_folder: String,
         video_folder: String,
+        tabs_folder: String,
         workspace_folder: String,
     ) -> Self {
         // A saved choice wins; otherwise the folders sit under the output folder.
@@ -52,6 +76,7 @@ impl Executor {
         let folders = load_folders().unwrap_or_else(|| Folders {
             audio: output_folder.join(audio_folder),
             video: output_folder.join(video_folder),
+            tabs: None,
         });
         Self {
             yt_dlp_path,
@@ -60,6 +85,7 @@ impl Executor {
             preferred_audio_format,
             preferred_video_format,
             folders: Arc::new(RwLock::new(folders)),
+            default_tabs_folder: output_folder.join(tabs_folder),
             workspace_folder: PathBuf::from(workspace_folder),
         }
     }
@@ -87,25 +113,31 @@ impl Executor {
             env::var("OUTPUT_FOLDER").unwrap_or(downloads.to_string_lossy().to_string()),
             env::var("AUDIO_FOLDER").unwrap_or("audio".to_string()),
             env::var("VIDEO_FOLDER").unwrap_or("video".to_string()),
+            env::var("TABS_FOLDER").unwrap_or("tabs".to_string()),
             env::var("WORKSPACE_FOLDER").unwrap_or(workspace.to_string_lossy().to_string()),
         )
     }
 
-    /// The folder this kind of download goes to.
-    pub fn folder(&self, media: Media) -> PathBuf {
+    /// The folder this kind of file goes to.
+    pub fn folder(&self, kind: impl Into<Folder>) -> PathBuf {
         let folders = self.folders.read().unwrap();
-        match media {
-            Media::Audio => folders.audio.clone(),
-            Media::Video => folders.video.clone(),
+        match kind.into() {
+            Folder::Audio => folders.audio.clone(),
+            Folder::Video => folders.video.clone(),
+            Folder::Tabs => folders
+                .tabs
+                .clone()
+                .unwrap_or_else(|| self.default_tabs_folder.clone()),
         }
     }
 
-    /// Sends this kind of download to `folder` from now on, and remembers it.
-    pub fn set_folder(&self, media: Media, folder: PathBuf) -> io::Result<()> {
+    /// Sends this kind of file to `folder` from now on, and remembers it.
+    pub fn set_folder(&self, kind: impl Into<Folder>, folder: PathBuf) -> io::Result<()> {
         let mut folders = self.folders.write().unwrap();
-        match media {
-            Media::Audio => folders.audio = folder,
-            Media::Video => folders.video = folder,
+        match kind.into() {
+            Folder::Audio => folders.audio = folder,
+            Folder::Video => folders.video = folder,
+            Folder::Tabs => folders.tabs = Some(folder),
         }
         save_folders(&folders)
     }
@@ -225,4 +257,34 @@ fn save_folders(folders: &Folders) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(folders)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folders_from_before_tabs_still_load() {
+        let saved = r#"{ "audio": "/music", "video": "/videos" }"#;
+        let folders: Folders = serde_json::from_str(saved).unwrap();
+        assert_eq!(folders.tabs, None);
+        // And until someone picks a tabs folder, it isn't written out.
+        assert!(!serde_json::to_string(&folders).unwrap().contains("tabs"));
+
+        let executor = Executor {
+            yt_dlp_path: String::new(),
+            ffmpeg_path: String::new(),
+            js_runtime: None,
+            preferred_audio_format: String::new(),
+            preferred_video_format: String::new(),
+            folders: Arc::new(RwLock::new(folders)),
+            default_tabs_folder: PathBuf::from("/downloads/tabs"),
+            workspace_folder: PathBuf::new(),
+        };
+        assert_eq!(executor.folder(Folder::Tabs), PathBuf::from("/downloads/tabs"));
+        assert_eq!(executor.folder(Media::Audio), PathBuf::from("/music"));
+        executor.folders.write().unwrap().tabs = Some(PathBuf::from("/tabs"));
+        assert_eq!(executor.folder(Folder::Tabs), PathBuf::from("/tabs"));
+        assert!(serde_json::to_string(&*executor.folders.read().unwrap()).unwrap().contains("\"tabs\""));
+    }
 }

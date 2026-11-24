@@ -9,9 +9,14 @@
 //! GET  /api/downloads/{id}/file     the downloaded file
 //! GET  /api/audio/search?q=…        search results as {"results": [{id, title, artist, duration, artwork}]}
 //! GET  /api/audio/download?id=…     a result's audio: 202 with Retry-After until it's ready, then the file
+//! GET  /api/tabs/song?url=…         a Songsterr song's tracks and synced YouTube videos
+//! POST /api/tabs                    {"url": "<Songsterr link>"} makes a Guitar Pro file of it
+//! GET  /api/tabs/{id}               {"status": "converting" | "done" | "failed", …}
+//! GET  /api/tabs/{id}/file          the .gp
 //!
 //! The two /api/audio routes follow the search and download contract that other apps speak, such
-//! as Riffalong's custom services (riffalong-ios docs/SERVICES.md).
+//! as Riffalong's custom services (riffalong-ios docs/SERVICES.md). The tabs routes take an
+//! optional `revision` (a Songsterr revision id) and otherwise use the song's latest.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -30,9 +35,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::songsterr::{self, Songsterr};
 use crate::tools::{self, Tool};
 use crate::youtube;
-use crate::yourip::{Executor, Media};
+use crate::yourip::{Executor, Folder, Media};
 
 pub const DEFAULT_ADDRESS: &str = "0.0.0.0:7479";
 
@@ -68,6 +74,8 @@ pub fn start(tokio: &tokio::runtime::Handle, youtube: RustyPipe, executor: Execu
         executor,
         downloads: Mutex::new(HashMap::new()),
         audio: Mutex::new(HashMap::new()),
+        songsterr: Songsterr::new(),
+        tabs: Mutex::new(HashMap::new()),
     });
 
     let listener = match bind(&address) {
@@ -107,6 +115,24 @@ struct ApiState {
     downloads: Mutex<HashMap<String, Download>>,
     /// Video id → download id, for /api/audio/download.
     audio: Mutex<HashMap<String, String>>,
+    songsterr: Songsterr,
+    tabs: Mutex<HashMap<String, TabJob>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum TabJob {
+    Converting,
+    Done {
+        file: String,
+        #[serde(skip)]
+        path: PathBuf,
+        /// What made it into the file: notes written and read back, sections, lyrics, tracks.
+        report: serde_json::Value,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -132,6 +158,10 @@ fn router(state: Arc<ApiState>) -> Router {
         .route("/api/downloads/{id}/file", get(download_file))
         .route("/api/audio/search", get(audio_search))
         .route("/api/audio/download", get(audio_download))
+        .route("/api/tabs/song", get(tab_song))
+        .route("/api/tabs", post(start_tab))
+        .route("/api/tabs/{id}", get(tab_status))
+        .route("/api/tabs/{id}/file", get(tab_file))
         .layer(middleware::from_fn_with_state(state.clone(), require_key))
         .with_state(state)
 }
@@ -360,6 +390,91 @@ async fn download_file(State(state): State<Arc<ApiState>>, Path(id): Path<String
         Some(Download::Done { path, .. }) => path.clone(),
         Some(_) => return error(StatusCode::CONFLICT, "That download isn't finished"),
         None => return error(StatusCode::NOT_FOUND, "No download with that id"),
+    };
+    serve_file(&path).await
+}
+
+#[derive(Deserialize)]
+struct TabQuery {
+    url: String,
+    revision: Option<u64>,
+}
+
+const NOT_A_SONGSTERR_LINK: &str =
+    "url must be a Songsterr link, like https://www.songsterr.com/a/wsa/oasis-wonderwall-tab-s2";
+
+/// A song's title, tracks and tunings, and the YouTube videos Songsterr syncs it with, each with
+/// the time every bar starts.
+async fn tab_song(State(state): State<Arc<ApiState>>, Query(query): Query<TabQuery>) -> Response {
+    let Some(song) = songsterr::song_id(&query.url) else {
+        return error(StatusCode::BAD_REQUEST, NOT_A_SONGSTERR_LINK);
+    };
+    match state.songsterr.song(song, query.revision).await {
+        Ok(song) => Json(song).into_response(),
+        Err(err) => {
+            eprintln!("API Songsterr song {song} failed: {err:#}");
+            error(StatusCode::BAD_GATEWAY, &format!("{err:#}"))
+        }
+    }
+}
+
+/// Fetches every track of a Songsterr song in the background, writes a Guitar Pro 7 file to the
+/// tabs folder (chosen in Settings), and returns the job's id.
+async fn start_tab(State(state): State<Arc<ApiState>>, Json(request): Json<TabQuery>) -> Response {
+    let Some(song) = songsterr::song_id(&request.url) else {
+        return error(StatusCode::BAD_REQUEST, NOT_A_SONGSTERR_LINK);
+    };
+    let id = Uuid::new_v4().simple().to_string();
+    state.tabs.lock().unwrap().insert(id.clone(), TabJob::Converting);
+
+    let job = state.clone();
+    let job_id = id.clone();
+    tokio::spawn(async move {
+        let result = match job.songsterr.tab(song, request.revision).await {
+            Ok(tab) => songsterr::save(&tab, &job.executor.folder(Folder::Tabs))
+                .await
+                .map(|path| (path, tab)),
+            Err(err) => Err(err),
+        };
+        let done = match result {
+            Ok((path, tab)) => TabJob::Done {
+                file: tab.file_name,
+                path,
+                report: tab.report,
+            },
+            Err(err) => {
+                eprintln!("API Songsterr tab {song} failed: {err:#}");
+                TabJob::Failed {
+                    error: format!("{err:#}"),
+                }
+            }
+        };
+        job.tabs.lock().unwrap().insert(job_id, done);
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": id, "status": "converting" })),
+    )
+        .into_response()
+}
+
+async fn tab_status(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    match state.tabs.lock().unwrap().get(&id) {
+        Some(job) => {
+            let mut body = serde_json::to_value(job).unwrap_or_default();
+            body["id"] = json!(id);
+            Json(body).into_response()
+        }
+        None => error(StatusCode::NOT_FOUND, "No tab with that id"),
+    }
+}
+
+async fn tab_file(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let path = match state.tabs.lock().unwrap().get(&id) {
+        Some(TabJob::Done { path, .. }) => path.clone(),
+        Some(TabJob::Failed { error: message }) => return error(StatusCode::CONFLICT, message),
+        Some(TabJob::Converting) => return error(StatusCode::CONFLICT, "That tab isn't finished"),
+        None => return error(StatusCode::NOT_FOUND, "No tab with that id"),
     };
     serve_file(&path).await
 }

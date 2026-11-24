@@ -8,6 +8,10 @@ date, so nothing else needs installing to use it. Downloads go to `Downloads/Rip
 `Downloads/Rippy/video` unless you choose other folders under **Save downloads to** in Settings
 (the gear).
 
+Paste a [Songsterr](https://www.songsterr.com) link into the search box and press Enter to save
+that song's tab as a Guitar Pro file, with every track. Tabs go to `Downloads/Rippy/tabs`, or the
+folder you choose for **Tabs from Songsterr** in Settings.
+
 ## Download
 
 Get the zip for your computer from the
@@ -117,6 +121,30 @@ Settings. Send the key as `Authorization: Bearer <key>`.
 | `GET /api/downloads/{id}/file` | The downloaded file |
 | `GET /api/audio/search?q=…` | Search results as `{"results": [{id, title, artist, duration, artwork}]}` |
 | `GET /api/audio/download?id=…` | A result's audio: `202` with `Retry-After` until it's ready, then the file |
+| `GET /api/tabs/song?url=…` | A Songsterr song's tracks and tunings, and the YouTube videos it's synced with, each with the time every bar starts |
+| `POST /api/tabs` with `{"url": "<Songsterr link>"}` | Starts making a Guitar Pro file of the song, returns its `id` |
+| `GET /api/tabs/{id}` | `converting`, `done` or `failed`; when done, a `report` of what went into the file |
+| `GET /api/tabs/{id}/file` | The `.gp` |
+
+### Guitar Pro files from Songsterr
+
+Give the tabs routes a Songsterr link (`https://www.songsterr.com/a/wsa/oasis-wonderwall-tab-s2`)
+or just the song id (`2`). They use the song's latest revision unless you add `revision` (a query
+parameter on `GET`, a number in the `POST` body).
+
+Rippy reads the same files Songsterr's own player does, with no Songsterr account, and writes a
+Guitar Pro 7 file with every track: tunings, capos, tempo changes, sections, repeats, chord names,
+dynamics, lyrics and the playing techniques (bends, slides, hammer-ons and pull-offs, vibrato,
+harmonics, palm muting and the rest). It then reads the file back and compares every note; the
+`report` gives `notes` and `matched` for the song and for each track, and anything Songsterr had
+that didn't carry over. Chord diagrams (only the names come over) and mid-song sound changes
+aren't in the file yet. A long song takes a few seconds once its tracks have downloaded.
+
+The file is also saved to the tabs folder (`Downloads/Rippy/tabs`, or the one chosen in Settings),
+replacing one with the same name.
+
+The `.gp` is written by [alphaTab](https://alphatab.net) (MPL-2.0, in `vendor/alphatab`), running
+in the JavaScript engine Rippy already uses for YouTube.
 
 Set `RIPPY_API_ADDR` (for example `127.0.0.1:7479`) to change where it listens.
 

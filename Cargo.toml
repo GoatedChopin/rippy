@@ -1,6 +1,6 @@
 [package]
 name = "rippy"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 # rustypipe, which Rippy is built on, is GPL-3.0, so Rippy is too.
 license = "GPL-3.0"
@@ -18,13 +18,15 @@ futures = "0.3.34"
 gpui-kit = { version = "0.9.0" }
 http-cache-reqwest = "0.15"
 regex = "1.13.1"
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.12", features = ["stream", "json", "gzip"] }
 reqwest-middleware = "0.4"
+# The JavaScript engine that runs alphaTab for Songsterr links; rustypipe already builds it.
+rquickjs = "0.9"
 rustypipe = "0.11.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 uuid = { version = "1.29.0", features = ["v4"] }
 zip = { version = "9.4.0", default-features = false, features = ["deflate"] }
@@ -35,6 +37,7 @@ gpui-component = { opt-level = 3 }
 gpui-kit = { opt-level = 3 }
 gpui-kit-assets = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
+rquickjs-sys = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }

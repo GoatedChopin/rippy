@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::assets::Assets;
@@ -25,17 +26,19 @@ use rustypipe::client::RustyPipe;
 mod api;
 mod feed;
 mod http;
+mod songsterr;
 mod tools;
 mod update;
 mod youtube;
 mod yourip;
 
+use songsterr::Songsterr;
 use tools::Tool;
 use youtube::SearchHit;
-use yourip::{Executor, Media};
+use yourip::{Executor, Folder, Media};
 
 // The default assets only carry the icons gpui-kit's own components use.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Download]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Download, Guitar]);
 
 struct AppAssets;
 
@@ -84,9 +87,27 @@ enum Results {
     Failed,
 }
 
+/// A Songsterr link pasted into the search box, and how saving its tab went.
+struct TabCard {
+    song: u64,
+    state: TabState,
+}
+
+enum TabState {
+    Working,
+    Saved {
+        title: SharedString,
+        details: SharedString,
+        path: PathBuf,
+    },
+    Failed,
+}
+
 struct VideoList {
     results: Results,
+    tabs: Vec<TabCard>,
     executor: Executor,
+    songsterr: Songsterr,
     tokio: tokio::runtime::Handle,
     tools: Entity<tools::Tools>,
     downloading: HashSet<(SharedString, Media)>,
@@ -105,7 +126,9 @@ impl VideoList {
         let subscription = cx.observe(&tools, |_, _, cx| cx.notify());
         Self {
             results: Results::NotSearched,
+            tabs: Vec::new(),
             executor,
+            songsterr: Songsterr::new(),
             tokio,
             tools,
             downloading: HashSet::new(),
@@ -115,7 +138,137 @@ impl VideoList {
 
     fn show(&mut self, results: Results, cx: &mut Context<Self>) {
         self.results = results;
+        // A new search clears finished tabs; ones still on their way stay.
+        self.tabs.retain(|card| matches!(card.state, TabState::Working));
         cx.notify();
+    }
+
+    /// Whether quitting now would leave a download or a tab half done.
+    fn busy(&self) -> bool {
+        !self.downloading.is_empty()
+            || self.tabs.iter().any(|card| matches!(card.state, TabState::Working))
+    }
+
+    /// Saves a Songsterr song as a Guitar Pro file in the tabs folder. Doesn't need yt-dlp and
+    /// the other tools, so it works while they install.
+    fn get_tab(&mut self, song: u64, cx: &mut Context<Self>) {
+        if self
+            .tabs
+            .iter()
+            .any(|card| card.song == song && matches!(card.state, TabState::Working))
+        {
+            return;
+        }
+        self.tabs.retain(|card| card.song != song);
+        self.tabs.insert(
+            0,
+            TabCard {
+                song,
+                state: TabState::Working,
+            },
+        );
+
+        let songsterr = self.songsterr.clone();
+        let folder = self.executor.folder(Folder::Tabs);
+        let task = self.tokio.spawn(async move {
+            let tab = songsterr.tab(song, None).await?;
+            let path = songsterr::save(&tab, &folder).await?;
+            anyhow::Ok((tab, path))
+        });
+        cx.spawn(async move |this, cx| {
+            let state = match task.await {
+                Ok(Ok((tab, path))) => {
+                    let text = |key: &str| tab.report[key].as_str().unwrap_or_default().to_string();
+                    let tracks = tab.report["tracks"].as_array().map_or(0, Vec::len);
+                    let tracks = if tracks == 1 {
+                        "1 track".to_string()
+                    } else {
+                        format!("{tracks} tracks")
+                    };
+                    let details = [text("artist"), tracks, "Guitar Pro".to_string()]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    TabState::Saved {
+                        title: text("title").into(),
+                        details: details.into(),
+                        path,
+                    }
+                }
+                Ok(Err(err)) => {
+                    eprintln!("Songsterr tab {song} failed: {err:#}");
+                    TabState::Failed
+                }
+                Err(err) => {
+                    eprintln!("Songsterr tab task failed: {err}");
+                    TabState::Failed
+                }
+            };
+            this.update(cx, |this, cx| {
+                if let Some(card) = this.tabs.iter_mut().find(|card| card.song == song) {
+                    card.state = state;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_tab(&self, card: &TabCard, cx: &mut Context<Self>) -> AnyElement {
+        let radius = cx.theme().radius;
+        let muted = cx.theme().muted_foreground;
+        let (title, details): (SharedString, Option<SharedString>) = match &card.state {
+            TabState::Working => ("Getting the tab from Songsterr…".into(), None),
+            TabState::Saved { title, details, .. } => (title.clone(), Some(details.clone())),
+            TabState::Failed => (
+                "Couldn't get that tab from Songsterr".into(),
+                Some("Check the link and your connection, then try again.".into()),
+            ),
+        };
+
+        h_flex()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(120.))
+                    .h(px(68.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(radius)
+                    .bg(cx.theme().muted)
+                    .child(Icon::new(Lucide::Guitar).text_color(muted)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(div().text_sm().truncate().child(title))
+                    .when_some(details, |column, details| {
+                        column.child(div().text_xs().text_color(muted).truncate().child(details))
+                    }),
+            )
+            .map(|row| match &card.state {
+                TabState::Working => row.child(div().flex_none().child(Spinner::new().small())),
+                TabState::Saved { path, .. } => {
+                    let path = path.clone();
+                    row.child(
+                        Button::new(SharedString::from(format!("show-tab-{}", card.song)))
+                            .small()
+                            .outline()
+                            .icon(Icon::new(Lucide::FolderOpen))
+                            .label("Show in folder")
+                            .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                    )
+                }
+                TabState::Failed => row,
+            })
+            .into_any_element()
     }
 
     fn download(
@@ -270,6 +423,12 @@ impl Render for VideoList {
                     .px_3()
                     .pb_3()
                     .gap_3()
+                    .children(
+                        self.tabs
+                            .iter()
+                            .map(|card| self.render_tab(card, cx))
+                            .collect::<Vec<_>>(),
+                    )
                     .when_some(setup, |list, setup| list.child(message(setup)))
                     .map(|list| match &self.results {
                         Results::NotSearched => list,
@@ -328,7 +487,7 @@ impl Settings {
         }
     }
 
-    fn choose_folder(&mut self, media: Media, window: &mut Window, cx: &mut Context<Self>) {
+    fn choose_folder(&mut self, kind: Folder, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -357,7 +516,7 @@ impl Settings {
             let Some(folder) = folder else {
                 return;
             };
-            let saved = executor.set_folder(media, folder);
+            let saved = executor.set_folder(kind, folder);
             this.update_in(cx, |_, window, cx| {
                 if let Err(err) = saved {
                     eprintln!("Couldn't save the download folder: {err}");
@@ -373,12 +532,13 @@ impl Settings {
         .detach();
     }
 
-    fn folder_row(&self, media: Media, cx: &mut Context<Self>) -> AnyElement {
-        let (id, label) = match media {
-            Media::Audio => ("change-audio-folder", "Audio"),
-            Media::Video => ("change-video-folder", "Video"),
+    fn folder_row(&self, kind: Folder, cx: &mut Context<Self>) -> AnyElement {
+        let (id, label) = match kind {
+            Folder::Audio => ("change-audio-folder", "Audio"),
+            Folder::Video => ("change-video-folder", "Video"),
+            Folder::Tabs => ("change-tabs-folder", "Tabs from Songsterr"),
         };
-        let folder = self.executor.folder(media).to_string_lossy().to_string();
+        let folder = self.executor.folder(kind).to_string_lossy().to_string();
 
         h_flex()
             .justify_between()
@@ -402,7 +562,7 @@ impl Settings {
                     .outline()
                     .label("Change…")
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.choose_folder(media, window, cx);
+                        this.choose_folder(kind, window, cx);
                     })),
             )
             .into_any_element()
@@ -510,8 +670,9 @@ impl Render for Settings {
             .map(|tool| Self::tool_row(tools, tool, cx).into_any_element());
         let (tools, updater) = (self.tools.clone(), self.updater.clone());
         let heading = |text: &'static str| div().text_sm().font_semibold().child(text);
-        let audio_folder = self.folder_row(Media::Audio, cx);
-        let video_folder = self.folder_row(Media::Video, cx);
+        let audio_folder = self.folder_row(Folder::Audio, cx);
+        let video_folder = self.folder_row(Folder::Video, cx);
+        let tabs_folder = self.folder_row(Folder::Tabs, cx);
 
         v_flex()
             .gap_5()
@@ -520,7 +681,8 @@ impl Render for Settings {
                     .gap_3()
                     .child(heading("Save downloads to"))
                     .child(audio_folder)
-                    .child(video_folder),
+                    .child(video_folder)
+                    .child(tabs_folder),
             )
             .child(
                 v_flex()
@@ -626,7 +788,7 @@ impl SearchBox {
 
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Quitting now would leave a download half done.
-        if !self.results.read(cx).downloading.is_empty() {
+        if self.results.read(cx).busy() {
             window.push_notification(
                 Notification::info("Restart once your downloads finish."),
                 cx,
@@ -659,6 +821,15 @@ impl SearchBox {
             return;
         }
         println!("Searching for {term}");
+
+        // A Songsterr link saves the song's tab instead of searching.
+        if let Some(song) = songsterr::link_song_id(term) {
+            self.search_task = None;
+            self.searching = false;
+            self.results.update(cx, |list, cx| list.get_tab(song, cx));
+            cx.notify();
+            return;
+        }
 
         if self.is_url(cx) {
             println!("Searching for a url");

@@ -6073,7 +6073,7 @@ dependencies = [
 
 [[package]]
 name = "rippy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6088,6 +6088,7 @@ dependencies = [
  "regex",
  "reqwest",
  "reqwest-middleware",
+ "rquickjs",
  "rustypipe",
  "serde",
  "serde_json",
